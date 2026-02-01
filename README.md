@@ -22,3 +22,5 @@ Here are the pythpn scrips to solve the quest.
 
 3) analytics.ipynb is a Jupyter notebook built using PySpark, where the BLS and population data are analyzed to extract meaningful insights.
 
+4)  rearc_iac_v3.yml is a CloudFormation template written in YAML that provisions a data pipeline from an S3 bucket to a Lambda function, using SQS and EventBridge for scheduling and orchestration. To deploy it, upload the bls_api_lambda_v3.zip Lambda package to the designated S3 bucket and update the YAML file accordingly.
+
