@@ -1,0 +1,200 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Stack for BLS API Data Fetching and Analytics Pipeline'
+
+Parameters:
+  CodeBucketName:
+    Type: String
+    Default: 'lambda-coding-files'
+    Description: 'S3 Bucket containing the Lambda zip file'
+  CodeZipKey:
+    Type: String
+    Default: 'bls_api_lambda_v3.zip'
+    Description: 'The .zip file name containing both python files'
+  BlsBucketName:
+    Type: String
+    Default: 'bls-time-series-gp-v3'
+    Description: 'Target bucket for BLS API data'
+  DataUsaBucketName:
+    Type: String
+    Default: 'data-usa-v3'
+    Description: 'Target bucket for Analytics data'
+
+Resources:
+
+  BlsApiLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: BlsS3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:DeleteObject'
+                Resource:
+                  - !Sub 'arn:aws:s3:::${BlsBucketName}/*'
+                  - !Sub 'arn:aws:s3:::${DataUsaBucketName}/*'
+              - Effect: Allow
+                Action:
+                  - 's3:ListBucket'
+                Resource:
+                  # These allow listing the BUCKET itself (notice no "/*" at the end)
+                  - !Sub 'arn:aws:s3:::${BlsBucketName}'
+                  - !Sub 'arn:aws:s3:::${DataUsaBucketName}'
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: '*'
+
+  BlsApiLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: bls_api_lambda_v3
+      Handler: bls_api_lambda_v3.lambda_handler
+      Role: !GetAtt BlsApiLambdaRole.Arn
+      Code:
+        S3Bucket: !Ref CodeBucketName
+        S3Key: !Ref CodeZipKey
+      Runtime: python3.9
+      Timeout: 60
+      MemorySize: 128
+
+  DailyTriggerRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "Trigger BLS API Lambda daily"
+      ScheduleExpression: "rate(1 day)"
+      State: "ENABLED"
+      Targets:
+        - Arn: !GetAtt BlsApiLambda.Arn
+          Id: "BlsApiTarget"
+
+  BlsApiLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref BlsApiLambda
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt DailyTriggerRule.Arn
+
+  AnalyticsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: analytics-processing-queue
+      VisibilityTimeout: 120
+
+  AnalyticsQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref AnalyticsQueue
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: "s3.amazonaws.com"
+            Action: "sqs:SendMessage"
+            Resource: !GetAtt AnalyticsQueue.Arn
+            Condition:
+              ArnLike:
+                aws:SourceArn: !Sub "arn:aws:s3:::${DataUsaBucketName}"
+
+  AnalyticsLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DataUsaS3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:DeleteObject'
+                Resource: !Sub 'arn:aws:s3:::${DataUsaBucketName}/*'
+        - PolicyName: SQSReadAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'sqs:ReceiveMessage'
+                  - 'sqs:DeleteMessage'
+                  - 'sqs:GetQueueAttributes'
+                Resource: !GetAtt AnalyticsQueue.Arn
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: '*'
+
+  AnalyticsLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: analytics_lambda_v3
+      Handler: analytics_lambda_v3.lambda_handler
+      Role: !GetAtt AnalyticsLambdaRole.Arn
+      Code:
+        S3Bucket: !Ref CodeBucketName
+        S3Key: !Ref CodeZipKey
+      Runtime: python3.9
+      Timeout: 60
+      MemorySize: 128
+
+  AnalyticsSqsTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 10
+      EventSourceArn: !GetAtt AnalyticsQueue.Arn
+      FunctionName: !Ref AnalyticsLambda
+      Enabled: true
+
+  DataUsaBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: AnalyticsQueuePolicy
+    Properties:
+      BucketName: !Ref DataUsaBucketName
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: 's3:ObjectCreated:*'
+            Queue: !GetAtt AnalyticsQueue.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .json
+
+  BlsTimeSeriesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref BlsBucketName
