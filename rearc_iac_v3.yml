@@ -71,7 +71,7 @@ Resources:
       Code:
         S3Bucket: !Ref CodeBucketName
         S3Key: !Ref CodeZipKey
-      Runtime: python3.9
+      Runtime: python3.14
       Timeout: 60
       MemorySize: 128
 
@@ -167,7 +167,7 @@ Resources:
       Code:
         S3Bucket: !Ref CodeBucketName
         S3Key: !Ref CodeZipKey
-      Runtime: python3.9
+      Runtime: python3.14
       Timeout: 60
       MemorySize: 128
 
